@@ -9,6 +9,57 @@ import { Heart, MessageCircle, Eye, Send } from "lucide-react"
 import Link from "next/link"
 import { redirect, notFound } from "next/navigation"
 import { formatDistanceToNow } from "date-fns"
+import { revalidatePath } from "next/cache"
+
+async function postComment(formData: FormData) {
+  "use server"
+  const supabase = await createClient()
+  const postId = formData.get("postId") as string
+  const content = formData.get("content") as string
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user || !content.trim()) {
+    return { error: "Unauthorized or empty comment" }
+  }
+
+  const { error } = await supabase.from("comments").insert({
+    post_id: postId,
+    author_id: user.id,
+    content: content.trim(),
+  })
+
+  if (error) {
+    return { error: error.message }
+  }
+
+  revalidatePath(`/post/${postId}`)
+  return { success: true }
+}
+
+async function toggleLike(postId: string, isLiked: boolean) {
+  "use server"
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    return { error: "Unauthorized" }
+  }
+
+  if (isLiked) {
+    await supabase.from("likes").delete().eq("post_id", postId).eq("user_id", user.id)
+  } else {
+    await supabase.from("likes").insert({ post_id: postId, user_id: user.id })
+  }
+
+  revalidatePath(`/post/${postId}`)
+  return { success: true }
+}
 
 export default async function PostPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -47,10 +98,13 @@ export default async function PostPage({ params }: { params: Promise<{ id: strin
   }
 
   // Increment view count
-  await supabase
-    .from("posts")
-    .update({ view_count: post.view_count + 1 })
-    .eq("id", id)
+  await supabase.rpc("increment_view_count", { post_id: id }).catch(() => {
+    // Fallback if function doesn't exist
+    supabase
+      .from("posts")
+      .update({ view_count: post.view_count + 1 })
+      .eq("id", id)
+  })
 
   const isLiked = post.likes?.some((like: any) => like.user_id === user.id)
 
@@ -114,10 +168,17 @@ export default async function PostPage({ params }: { params: Promise<{ id: strin
 
               {/* Engagement */}
               <div className="flex items-center gap-4 pt-4 border-t">
-                <Button variant="ghost" size="sm" className={`gap-2 ${isLiked ? "text-red-500" : ""}`}>
-                  <Heart className={`h-4 w-4 ${isLiked ? "fill-current" : ""}`} />
-                  {post.likes?.length || 0}
-                </Button>
+                <form
+                  action={async () => {
+                    "use server"
+                    await toggleLike(post.id, isLiked)
+                  }}
+                >
+                  <Button type="submit" variant="ghost" size="sm" className={`gap-2 ${isLiked ? "text-red-500" : ""}`}>
+                    <Heart className={`h-4 w-4 ${isLiked ? "fill-current" : ""}`} />
+                    {post.likes?.length || 0}
+                  </Button>
+                </form>
                 <Button variant="ghost" size="sm" className="gap-2">
                   <MessageCircle className="h-4 w-4" />
                   {post.comments?.length || 0}
@@ -137,8 +198,9 @@ export default async function PostPage({ params }: { params: Promise<{ id: strin
             {/* Comment Form */}
             <Card>
               <CardContent className="pt-6">
-                <form className="flex gap-4">
-                  <Textarea placeholder="Write a comment..." rows={3} className="resize-none" />
+                <form action={postComment} className="flex gap-4">
+                  <input type="hidden" name="postId" value={post.id} />
+                  <Textarea placeholder="Write a comment..." name="content" rows={3} className="resize-none" required />
                   <Button type="submit" size="sm" className="gap-2">
                     <Send className="h-4 w-4" />
                     Post

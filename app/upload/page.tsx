@@ -12,101 +12,100 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { ImageIcon, Video, FileText, UploadIcon, AlertCircle, CheckCircle2 } from "lucide-react"
+import { ImageIcon, Video, FileText, UploadIcon, AlertCircle, CheckCircle2, Loader2 } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useState, useEffect } from "react"
 
 type PostType = "article" | "photo" | "video"
 
 export default function UploadPage() {
-  const [postType, setPostType] = useState<PostType>("article")
+  const [postType, setPostType] = useState<PostType>("photo")
   const [title, setTitle] = useState("")
   const [content, setContent] = useState("")
   const [file, setFile] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
   const [userCollegeId, setUserCollegeId] = useState<string | null>(null)
-  const [userProfile, setUserProfile] = useState<any>(null)
+  const [uploadProgress, setUploadProgress] = useState<string>("")
 
   const router = useRouter()
-  const supabase = createClient()
 
   useEffect(() => {
     const fetchUserProfile = async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-      if (!user) return
+      try {
+        const supabase = createClient()
 
-      // Get user's profile and college
-      const { data: profile } = await supabase.from("profiles").select("*, college_id").eq("id", user.id).single()
+        const {
+          data: { user },
+        } = await supabase.auth.getUser()
 
-      if (profile) {
-        setUserProfile(profile)
-        setUserCollegeId(profile.college_id)
-      } else {
-        // User doesn't have a profile yet, create one
-        const collegeDomain = getCollegeDomain(user.email || "")
-        const { data: college } = await supabase.from("colleges").select("id").eq("domain", collegeDomain).single()
-
-        if (college) {
-          await supabase.from("profiles").insert({
-            id: user.id,
-            email: user.email,
-            display_name: user.user_metadata?.display_name || user.email?.split("@")[0] || "User",
-            college_id: college.id,
-            is_verified: true,
-          })
-          setUserCollegeId(college.id)
+        if (!user) {
+          setError("Please log in to upload content")
+          return
         }
+
+        const { data: profile } = await supabase.from("profiles").select("*, college_id").eq("id", user.id).single()
+
+        if (profile) {
+          setUserCollegeId(profile.college_id)
+        } else {
+          const collegeDomain = getCollegeDomain(user.email || "")
+          const { data: college } = await supabase.from("colleges").select("id").eq("domain", collegeDomain).single()
+
+          if (college) {
+            const { error: insertError } = await supabase.from("profiles").insert({
+              id: user.id,
+              email: user.email,
+              display_name: user.user_metadata?.display_name || user.email?.split("@")[0] || "User",
+              college_id: college.id,
+              is_verified: true,
+            })
+
+            if (!insertError) {
+              setUserCollegeId(college.id)
+            }
+          }
+        }
+      } catch (err: any) {
+        setError("Failed to load user profile")
       }
     }
 
     fetchUserProfile()
-  }, [supabase])
+  }, [])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null)
+
     if (e.target.files && e.target.files[0]) {
       const selectedFile = e.target.files[0]
 
-      // Validate file type
       if (postType === "photo" && !selectedFile.type.startsWith("image/")) {
-        setError("Please select an image file")
+        setError("Please select an image file (JPG, PNG, GIF)")
         return
       }
       if (postType === "video" && !selectedFile.type.startsWith("video/")) {
-        setError("Please select a video file")
+        setError("Please select a video file (MP4, MOV)")
         return
       }
 
-      // Validate file size (max 50MB)
       if (selectedFile.size > 50 * 1024 * 1024) {
         setError("File size must be less than 50MB")
         return
       }
 
       setFile(selectedFile)
-      setError(null)
+
+      if (postType === "photo") {
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          setPreviewUrl(reader.result as string)
+        }
+        reader.readAsDataURL(selectedFile)
+      }
     }
-  }
-
-  const uploadFile = async (file: File, userId: string): Promise<string | null> => {
-    const fileExt = file.name.split(".").pop()
-    const fileName = `${userId}/${Date.now()}.${fileExt}`
-
-    const { error: uploadError } = await supabase.storage.from("uploads").upload(fileName, file)
-
-    if (uploadError) {
-      console.error("[v0] Upload error:", uploadError)
-      return null
-    }
-
-    const {
-      data: { publicUrl },
-    } = supabase.storage.from("uploads").getPublicUrl(fileName)
-
-    return publicUrl
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -114,37 +113,64 @@ export default function UploadPage() {
     setIsLoading(true)
     setError(null)
     setSuccess(false)
+    setUploadProgress("Initializing...")
 
     try {
+      const supabase = createClient()
+
+      setUploadProgress("Checking authentication...")
       const {
         data: { user },
       } = await supabase.auth.getUser()
-      if (!user || !userCollegeId) {
-        throw new Error("You must be logged in and verified to post")
+
+      if (!user) {
+        throw new Error("You must be logged in to post")
+      }
+
+      if (!userCollegeId) {
+        throw new Error("Could not determine your college affiliation")
       }
 
       let mediaUrl: string | null = null
       let mediaType: string | null = null
 
-      // Upload file if it's a photo or video
       if ((postType === "photo" || postType === "video") && file) {
-        mediaUrl = await uploadFile(file, user.id)
+        setUploadProgress("Uploading file to storage...")
+
+        const fileExt = file.name.split(".").pop()
+        const fileName = `${user.id}/${Date.now()}.${fileExt}`
+
+        const { data: uploadData, error: uploadError } = await supabase.storage.from("uploads").upload(fileName, file, {
+          cacheControl: "3600",
+          upsert: false,
+        })
+
+        if (uploadError) {
+          throw new Error(`Upload failed: ${uploadError.message}`)
+        }
+
+        if (!uploadData) {
+          throw new Error("Upload succeeded but no data returned")
+        }
+
+        const {
+          data: { publicUrl },
+        } = supabase.storage.from("uploads").getPublicUrl(uploadData.path)
+
+        mediaUrl = publicUrl
         mediaType = file.type
 
-        if (!mediaUrl) {
-          throw new Error("Failed to upload file")
-        }
+        setUploadProgress("File uploaded successfully!")
       }
 
-      // Validate content
       if (postType === "article" && !content.trim()) {
         throw new Error("Article content is required")
       }
       if ((postType === "photo" || postType === "video") && !mediaUrl) {
-        throw new Error(`${postType === "photo" ? "Image" : "Video"} file is required`)
+        throw new Error(`Please select a ${postType} file to upload`)
       }
 
-      // Create post
+      setUploadProgress("Creating post...")
       const { error: postError } = await supabase.from("posts").insert({
         author_id: user.id,
         college_id: userCollegeId,
@@ -155,32 +181,36 @@ export default function UploadPage() {
         media_type: mediaType,
       })
 
-      if (postError) throw postError
+      if (postError) {
+        throw new Error(`Failed to create post: ${postError.message}`)
+      }
 
       setSuccess(true)
+      setUploadProgress("Post published successfully!")
+
       setTitle("")
       setContent("")
       setFile(null)
+      setPreviewUrl(null)
 
-      // Redirect to feed after 2 seconds
       setTimeout(() => {
         router.push("/feed")
       }, 2000)
-    } catch (error: any) {
-      console.error("[v0] Error creating post:", error)
-      setError(error.message || "An error occurred while creating your post")
+    } catch (err: any) {
+      setError(err.message || "An error occurred while creating your post")
+      setUploadProgress("")
     } finally {
       setIsLoading(false)
     }
   }
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col bg-gradient-to-b from-background to-muted/20">
       <Navbar />
-      <main className="container py-8">
+      <main className="container py-8 px-4 md:px-8">
         <div className="max-w-2xl mx-auto">
-          <div className="flex flex-col gap-2 mb-8">
-            <h1 className="text-3xl font-bold">Create Post</h1>
+          <div className="flex flex-col gap-2 mb-8 animate-in fade-in slide-in-from-top-4 duration-500">
+            <h1 className="text-3xl md:text-4xl font-bold">Create Post</h1>
             <p className="text-muted-foreground">Share photos, videos, or articles with your campus community</p>
           </div>
 
@@ -189,21 +219,23 @@ export default function UploadPage() {
             onValueChange={(value) => {
               setPostType(value as PostType)
               setFile(null)
+              setPreviewUrl(null)
               setError(null)
             }}
+            className="animate-in fade-in slide-in-from-bottom-4 duration-500"
           >
             <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="article" className="gap-2">
                 <FileText className="h-4 w-4" />
-                Article
+                <span className="hidden sm:inline">Article</span>
               </TabsTrigger>
               <TabsTrigger value="photo" className="gap-2">
                 <ImageIcon className="h-4 w-4" />
-                Photo
+                <span className="hidden sm:inline">Photo</span>
               </TabsTrigger>
               <TabsTrigger value="video" className="gap-2">
                 <Video className="h-4 w-4" />
-                Video
+                <span className="hidden sm:inline">Video</span>
               </TabsTrigger>
             </TabsList>
 
@@ -275,14 +307,24 @@ export default function UploadPage() {
                         <Input
                           id="photo-file"
                           type="file"
-                          accept="image/*"
+                          accept="image/jpeg,image/png,image/gif,image/webp"
                           onChange={handleFileChange}
                           required
                           className="cursor-pointer"
                         />
-                        {file && <CheckCircle2 className="h-5 w-5 text-green-500" />}
+                        {file && <CheckCircle2 className="h-5 w-5 text-green-500 flex-shrink-0" />}
                       </div>
-                      <p className="text-xs text-muted-foreground">Accepted: JPG, PNG, GIF (Max 50MB)</p>
+                      <p className="text-xs text-muted-foreground">Accepted: JPG, PNG, GIF, WebP (Max 50MB)</p>
+
+                      {previewUrl && (
+                        <div className="mt-4 rounded-lg border overflow-hidden">
+                          <img
+                            src={previewUrl || "/placeholder.svg"}
+                            alt="Preview"
+                            className="w-full h-auto max-h-96 object-contain"
+                          />
+                        </div>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -322,12 +364,12 @@ export default function UploadPage() {
                         <Input
                           id="video-file"
                           type="file"
-                          accept="video/*"
+                          accept="video/mp4,video/mov,video/avi"
                           onChange={handleFileChange}
                           required
                           className="cursor-pointer"
                         />
-                        {file && <CheckCircle2 className="h-5 w-5 text-green-500" />}
+                        {file && <CheckCircle2 className="h-5 w-5 text-green-500 flex-shrink-0" />}
                       </div>
                       <p className="text-xs text-muted-foreground">Accepted: MP4, MOV, AVI (Max 50MB)</p>
                     </div>
@@ -336,23 +378,39 @@ export default function UploadPage() {
               </TabsContent>
 
               {error && (
-                <Alert variant="destructive" className="mt-4">
+                <Alert variant="destructive" className="mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>{error}</AlertDescription>
                 </Alert>
               )}
 
               {success && (
-                <Alert className="mt-4 border-green-500 text-green-600">
+                <Alert className="mt-4 border-green-500 bg-green-50 text-green-600 animate-in fade-in slide-in-from-top-2 duration-300">
                   <CheckCircle2 className="h-4 w-4" />
                   <AlertDescription>Post created successfully! Redirecting to feed...</AlertDescription>
                 </Alert>
               )}
 
+              {isLoading && uploadProgress && (
+                <Alert className="mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <AlertDescription>{uploadProgress}</AlertDescription>
+                </Alert>
+              )}
+
               <div className="flex gap-4 mt-6">
                 <Button type="submit" className="flex-1 gap-2" disabled={isLoading || !userCollegeId}>
-                  <UploadIcon className="h-4 w-4" />
-                  {isLoading ? "Publishing..." : "Publish Post"}
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Publishing...
+                    </>
+                  ) : (
+                    <>
+                      <UploadIcon className="h-4 w-4" />
+                      Publish Post
+                    </>
+                  )}
                 </Button>
                 <Button type="button" variant="outline" onClick={() => router.push("/feed")} disabled={isLoading}>
                   Cancel

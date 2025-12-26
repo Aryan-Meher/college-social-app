@@ -57,16 +57,29 @@ export function PostCard({ post, currentUserId }: PostCardProps) {
   const handleLike = async () => {
     if (!currentUserId) return
 
+    const previousLiked = isLiked
+    const previousCount = likeCount
+
     if (isLiked) {
       // Unlike
-      await supabase.from("likes").delete().eq("post_id", post.id).eq("user_id", currentUserId)
       setIsLiked(false)
       setLikeCount((prev) => prev - 1)
+      const { error } = await supabase.from("likes").delete().eq("post_id", post.id).eq("user_id", currentUserId)
+      if (error) {
+        // Revert on error
+        setIsLiked(previousLiked)
+        setLikeCount(previousCount)
+      }
     } else {
       // Like
-      await supabase.from("likes").insert({ post_id: post.id, user_id: currentUserId })
       setIsLiked(true)
       setLikeCount((prev) => prev + 1)
+      const { error } = await supabase.from("likes").insert({ post_id: post.id, user_id: currentUserId })
+      if (error) {
+        // Revert on error
+        setIsLiked(previousLiked)
+        setLikeCount(previousCount)
+      }
     }
   }
 
